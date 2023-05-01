@@ -1,0 +1,7 @@
+/bin/
+/tests/
+.DS_Store
+.classpath
+.project
+.settings/
+logs/

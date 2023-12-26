@@ -14,5 +14,5 @@ For each test scenario, a test file with a set of variables should be defined.
 DockerManager will then, based on said variables, on their possible values and how those values should be iterated and repeated, generate all the possible test configurations, and coordinate the Clients to execute each of said tests.
 The file [testInput.txt](testInput.txt) contains an example of a test file.
 
-For VLDB reviewers: this tool was used to help executing the multiple experiments in our submission.
+For Eurosys reviewers: this tool was used to help executing the multiple experiments in our submission.
 Please check [here](https://github.com/AndreRijo/potiondb-vldb-configs-rep) for the list of test files and more that were used.

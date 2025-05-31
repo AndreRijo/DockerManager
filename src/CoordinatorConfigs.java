@@ -4,13 +4,14 @@ public class CoordinatorConfigs {
 	private int[] coordWaitFor;
 	private boolean isAutomaticRepair;
 	private int suspiciousOffset;	//Any test that ends too early on all active nodes will be considered as failed.
-	private boolean useOAR;
+	private boolean useOAR, stopOnError;
 	private String[] ips;
 	
 	public CoordinatorConfigs() {
 		isAutomaticRepair = false;
 		useOAR = false;
 		suspiciousOffset = 0;
+		stopOnError = false;
 	}
 	
 	public void setWaitFor(int[] waitFor) {
@@ -56,5 +57,13 @@ public class CoordinatorConfigs {
 	
 	public int getSuspiciousOffset() {
 		return suspiciousOffset;
+	}
+	
+	public void setStopOnError(boolean stop) {
+		stopOnError = stop;
+	}
+	
+	public boolean stopOnError() {
+		return stopOnError;
 	}
 }

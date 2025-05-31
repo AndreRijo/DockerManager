@@ -5,6 +5,7 @@ import java.io.PrintWriter;
 import java.net.Socket;
 import java.util.List;
 
+import exceptions.ConnectionFailedException;
 import exceptions.OARException;
 
 public class Coordinator {
@@ -23,6 +24,7 @@ public class Coordinator {
 	private int totalTests, testsDone, testsFailed;
 	private int[] waitFor;
 	private AutoRepair repairs;
+	private AutoRepair newRepairs;	//Contains list of repairs needed from... the auto repairs that failed.
 	
 	public Coordinator(CoordinatorConfigs cCfg, TestConfigs[] multipleCfg) {
 		coordConfigs = cCfg;
@@ -36,35 +38,47 @@ public class Coordinator {
 		multipleConfigs = multipleCfg;
 		this.remoteCmds = remoteCmds;
 	}
-
-	public void manageTests() throws NumberFormatException, IOException, InterruptedException {
-		waitUntilStart();
+	
+	public void prepareTests() throws NumberFormatException, IOException, InterruptedException, ConnectionFailedException {
 		if (coordConfigs.isAutomaticRepair())
 			System.out.println("[INFO]Automatic repair is on.");
 		time = new TimeManager(multipleConfigs);
 		totalTime = time.getTotalTime();
 		totalTests = time.getTotalTests();
 		waitFor = coordConfigs.getWaitFor();
-		repairs = new AutoRepair(multipleConfigs, coordConfigs.getSuspiciousOffset(), waitFor.length);
+		int waitForLength = 0;
+		if (waitFor != null)
+			waitForLength = waitFor.length;
+		repairs = new AutoRepair(multipleConfigs, coordConfigs.getSuspiciousOffset(), waitForLength);
+		waitUntilStart();
 		String[] ips = mainConfig.getIPs();
 		Socket[] clientSockets = new Socket[ips.length];
 		outs = new PrintWriter[ips.length];
 		ins = new BufferedReader[ips.length];
 		
-		for (int i = 0; i < ips.length; i++) {
-			int separatorPos = ips[i].indexOf(':');
-			clientSockets[i] = new Socket(ips[i].substring(0, separatorPos), 
-					Integer.parseInt(ips[i].substring(separatorPos+1)));
-			outs[i] = new PrintWriter(clientSockets[i].getOutputStream(), true);
-			ins[i] = new BufferedReader(new InputStreamReader(clientSockets[i].getInputStream()));
+		int i = 0;
+		try {
+			for (; i < ips.length; i++) {
+				int separatorPos = ips[i].indexOf(':');
+				clientSockets[i] = new Socket(ips[i].substring(0, separatorPos), 
+						Integer.parseInt(ips[i].substring(separatorPos+1)));
+				outs[i] = new PrintWriter(clientSockets[i].getOutputStream(), true);
+				ins[i] = new BufferedReader(new InputStreamReader(clientSockets[i].getInputStream()));
+			}
+		} catch (IOException e) {
+			System.err.println("[WARN]Failed to connect to " + ips[i] + ". Closing open connections.");
+			e.printStackTrace();
+			for (int j = 0; j < i; j++)
+				clientSockets[j].close();
+			throw new ConnectionFailedException(e);
 		}
 		
 		if (mainConfig.isRemoteConfigs())
 			sendRemoteConfigs();
 		
-		System.out.println("Duration of all tests: " + time.getTimeString(totalTime));
-		Thread.sleep(4000);
-		startTests();
+		//System.out.println("Duration of all tests: " + time.getTimeString(totalTime));
+		//Thread.sleep(4000);
+		//startTests();
 		
 	}
 	
@@ -83,7 +97,9 @@ public class Coordinator {
 		System.out.println("Commands sent to all nodes.");
 	}
 	
-	private void startTests() throws IOException {
+	public void startTests() throws IOException, InterruptedException {
+		System.out.println("Duration of all tests: " + time.getTimeString(totalTime));
+		Thread.sleep(4000);
 		currentConfigIndex = 0;
 		testsDone = 1;
 		for (TestConfigs cfg : multipleConfigs) {
@@ -112,6 +128,7 @@ public class Coordinator {
 	private void doTests() throws IOException {
 		TestConfigs configs = multipleConfigs[currentConfigIndex];
 		long start, finish;
+		boolean success;
 		for (int i = 0; i < configs.getNTests(); i++, testsDone++) {
 			start = System.currentTimeMillis();
 			for (int j = 0; j < outs.length; j++)
@@ -120,11 +137,27 @@ public class Coordinator {
 			int secondsLeft = configs.getTimeLeft(i);
 			System.out.printf("Expected time left until all tests finish: (%s) [%s, predicted: %s]\n", 
 					time.getTimeString(secondsLeft), time.getRemainingTimeString(secondsLeft, currentConfigIndex), time.getPredictedTimeLeft(secondsLeft, currentConfigIndex));
-			waitForClientsFinish(i, start, configs.getTestTime(), false);
-			System.out.printf("Test %d out of %d [%d/%d] has finished successfully in all nodes. Tests failed so far: %d\n", i+1, configs.getNTests(), testsDone, totalTests, testsFailed);
+			success = waitForClientsFinish(i, start, configs.getTestTime(), false);
+			if (success)
+				System.out.printf("Test %d out of %d [%d/%d] has finished successfully in all nodes. Tests failed so far: %d.\n", i+1, configs.getNTests(), testsDone, totalTests, testsFailed);
+			else if (!coordConfigs.stopOnError())
+				System.out.printf("[WARNING]Test %d out of %d [%d/%d] has failed. Skipping to the next test. Tests failed so far: %d.\n", i+1, configs.getNTests(), testsDone, totalTests, testsFailed);
+			else {
+				System.out.printf("[WARNING]Test %d out of %d [%d/%d] has failed. Aborting tests as Stop on Error option is active.\n", i+1, configs.getNTests(), testsDone, totalTests);
+				for (PrintWriter pw : outs)
+					pw.println(Messages.TEST_OVER.name());
+				signalClientShutdown();
+				System.exit(0);
+			}
 			finish = System.currentTimeMillis();
 			time.registerTestTime((int)(finish - start)/1000, configs.getTestTime());
+			/*if (!success) {
+				System.out.println("Exitting due to failed test.");
+				System.exit(0);
+			}*/
 		}
+		for (PrintWriter pw : outs)
+			pw.println(Messages.TEST_OVER.name());
 		
 		System.out.println("All tests done");
 	}
@@ -143,12 +176,17 @@ public class Coordinator {
 		}
 		int nRepairsDone = 0;
 		int lastRepairDone = -1;
+		boolean success;
 		//int i;
 		long start, finish;
 		//for (i = 0; i < configs.getNTests(); i++) {
 			//if (repairRange.isInRange(i)) {
 
 		for (Integer i : repairIt) {
+				if (i >= configs.getNTests()) {
+					System.out.printf("[Warning]Skipping test %d as it is outside of range [0-%d]\n", i, configs.getNTests()-1);
+					continue;	//Continue iterating in case we specify multiple ranges.
+				}
 				start = System.currentTimeMillis();
 				for (int j = 0; j < outs.length; j++)
 					outs[j].println(Messages.START_TEST.name() + i);
@@ -156,61 +194,90 @@ public class Coordinator {
 						configs.getNTests(), nRepairsDone+1, nRepairs, testsDone, totalTests);
 				System.out.printf("Expected time left until all repair tests finish: %s [%s, predicted: %s]\n", time.getTimeString(configs.getTimeLeft(nRepairsDone, nRepairs)), 
 						time.getRemainingTimeString(configs.getTimeLeft(nRepairsDone, nRepairs), currentConfigIndex), time.getPredictedTimeLeft(configs.getTimeLeft(nRepairsDone, nRepairs), currentConfigIndex));
-				waitForClientsFinish(i, start, configs.getTestTime(), isAutomaticRepair);
-				System.out.printf("Test %d out of %d (repair %d of %d repairs) has finished successfully in all nodes. Tests failed so far: %d\n", i+1, configs.getNTests(), nRepairsDone+1, nRepairs,
+				success = waitForClientsFinish(i, start, configs.getTestTime(), isAutomaticRepair);
+				if (success)
+					System.out.printf("Test %d out of %d (repair %d of %d repairs) has finished successfully in all nodes. Tests failed so far: %d\n", i+1, configs.getNTests(), nRepairsDone+1, nRepairs,
 						testsFailed);
+				else if (!coordConfigs.stopOnError())
+					System.out.printf("[WARNING]Test %d out of %d (repair %d of %d repairs) has failed. Skipping to the next repair. Tests failed so far: %d.\n", i+1, configs.getNTests(), nRepairsDone+1, 
+						nRepairs, testsFailed);
+				else {
+					System.out.printf("[WARNING]Test %d out of %d (repair %d of %d repairs) has failed. Aborting tests as Stop on Error option is active.\n", i+1, configs.getNTests(), nRepairsDone+1, nRepairs);
+					for (PrintWriter pw : outs)
+						pw.println(Messages.TEST_OVER.name());
+					signalClientShutdown();
+					System.exit(0);
+				}
+					
 				nRepairsDone++;
 				testsDone++;
 				lastRepairDone = i;
 				finish = System.currentTimeMillis();
 				time.registerTestTime((int)(finish - start)/1000, configs.getTestTime());
+				/*if (!success) {
+					System.out.println("Exitting due to failed test.");
+					System.exit(0);
+				}*/
 			//}
 		}
 		
-		if (lastRepairDone + 1 < configs.getNTests())		//If this is false the clients have already finished by themselves.
+		//if (lastRepairDone + 1 < configs.getNTests())		//If this is false the clients have already finished by themselves.
 			for (PrintWriter pw : outs)
-				pw.println(Messages.REPAIR_TEST_OVER.name());
+				pw.println(Messages.TEST_OVER.name());
 		
 		System.out.println("All repair tests done");
 	}
 	
-	//TODO: At the moment, auto-repairs won't repair tests that failed again. This would require modifying the list we are iterating or having a new repair list.
-	private void waitForClientsFinish(int currentTest, long startTime, int duration, boolean isDoingAutoRepair) throws IOException {
+	//Return true if the test was successful, false if not.
+	private boolean waitForClientsFinish(int currentTest, long startTime, int duration, boolean isDoingAutoRepair) throws IOException {
 		String read;
 		long finishTime;
+		boolean failed = false;
 		if (waitFor != null) {
 			//Wait for active nodes first
-			boolean failed;
 			for (int node : waitFor) {
+				boolean thisNodeFailed;
 				read = ins[node].readLine();
 				while (!read.startsWith(Messages.ACTIVE_OVER.toString()))
 					read = ins[node].readLine();
-				if (!isDoingAutoRepair) {
-					finishTime = System.currentTimeMillis();
-					failed = repairs.registerTest(node, read, currentTest, (int)(finishTime - startTime)/1000, duration);
-					if (failed) {
-						System.out.printf("[WARNING] - Client %d reported a timeout for test %d!\n", node + 1, currentTest);
-						testsFailed++;
-					}
+				finishTime = System.currentTimeMillis();
+				if (!isDoingAutoRepair)
+					thisNodeFailed = repairs.registerTest(node, read, currentTest, (int)(finishTime - startTime)/1000, duration);
+				else
+					thisNodeFailed = newRepairs.registerTest(node, read, currentTest, (int)(finishTime - startTime)/1000, duration);
+				if (thisNodeFailed) {
+					System.out.printf("[WARNING] - Client %d reported a timeout for test %d!\n", node + 1, currentTest);
+					testsFailed++;
 				}
+				if (thisNodeFailed)
+					failed = true;
 			}
-			repairs.resetSuspicion();
+			if (!isDoingAutoRepair)
+				repairs.resetSuspicion();
+			else
+				newRepairs.resetSuspicion();
 			System.out.println("Active nodes have finished executing current test.");
 			//Give a second for passive clients to catch up
 			try {
-				Thread.sleep(1000);
+				Thread.sleep(2000);
 			} catch (InterruptedException e) {
 				
 			}
 			//Need to send message to everyone
-			for (int j = 0; j < outs.length; j++)
+			System.out.println("Sending STOP messages to all nodes.");
+			for (int j = 0; j < outs.length; j++) {
 				outs[j].println(Messages.DO_STOP);
+				System.out.print("\rStop successfully sent to node" + j+1 + " (and all nodes before it)");
+			}
+			System.out.println();
+			System.out.println("Finished sending STOP messages to all nodes.");
 		}
 		for (int j = 0; j < ins.length; j++) {
 			read = ins[j].readLine();
 			while (!read.equalsIgnoreCase(Messages.TEST_DONE.toString()))
 				read = ins[j].readLine();
 		}
+		return !failed;
 	}
 	
 	private void waitUntilStart() {
@@ -219,7 +286,8 @@ public class Coordinator {
 			return;
 		long waitedFor = 0;
 		long startedSleeping = System.currentTimeMillis();
-		System.out.println("Sleeping...");
+		System.out.println("Duration of all tests: " + time.getTimeString(totalTime));
+		System.out.printf("Sleeping for %s...\n", time.getTimeString((int) (waitMillis/1000)));
 		while (waitedFor < waitMillis - 1000) {
 			try {
 				Thread.sleep(waitMillis);
@@ -230,48 +298,60 @@ public class Coordinator {
 	}
 	
 	private void doAutomaticRepair() throws IOException {
-		int repairTime = repairs.getRepairTime();
-		int nTests = repairs.getTotalTestsFailed();
-		if (nTests == 0) {
-			System.out.println("No automatic repair is needed. Excellent!");
+		int maxAttempts = 5;
+		for (int i = 0; i < maxAttempts; i++) {
+			int repairTime = repairs.getRepairTime();
+			int nTests = repairs.getTotalTestsFailed();
+			if (nTests == 0) {
+				System.out.println("No automatic repair is needed. Excellent!");
+				if (coordConfigs.useOAR())
+					OARHandler.deleteJob();
+				return;
+			}
+			
+			System.out.printf("Starting automatic repairing of %d tests, which is expected to take %s long.\n", nTests, time.getTimeString(repairTime));
+			newRepairs = new AutoRepair(multipleConfigs, coordConfigs.getSuspiciousOffset(), waitFor.length);
+			testsFailed = 0;
+			
+			if (coordConfigs.useOAR())
+				try {
+					OARHandler.updateWallTime(repairTime, nTests);
+				} catch (OARException e) {
+					System.err.println("[WARNING]Error while interacting with OAR. Proceeding without walltime extension.");
+					e.printStackTrace();
+				}
+			
+			for (PrintWriter out: outs)
+				out.println(Messages.START_AUTOMATIC_REPAIR.toString());
+			currentConfigIndex = 0;
+			
+			for (TestConfigs cfg: multipleConfigs) {
+				List<Integer> toRepair = repairs.getFailedTests(cfg);
+				if (toRepair.isEmpty())
+					System.out.println("Nothing to repair for test file " + cfg.getName());
+				else {
+					System.out.println("Starting automatic repairs for test file " + cfg.getName());
+					newRepairs.setCurrentConfigs(cfg);
+					for (PrintWriter out: outs)
+						out.println(Messages.AUTO_REPAIR_CFG_.toString() + currentConfigIndex);
+					cfg.setAutomaticRepairs(toRepair);
+					doRepairTests(IS_AUTOMATIC);
+					repairTime = repairs.getRepairTime(); nTests = repairs.getTotalTestsFailed();
+					System.out.printf("Finished automatic repairs for current file. Tests left: %d; Time left: %s; Test repaired name: %s\n", 
+							nTests, time.getTimeString(repairTime), cfg.getName());
+				}
+				currentConfigIndex++;
+			}
+			
+			for (PrintWriter out: outs)
+				out.println(Messages.TEST_OVER);	//Will be consumed by in.readLine() in the client's doAutomaticRepairs to break the cycle.
+			
 			if (coordConfigs.useOAR())
 				OARHandler.deleteJob();
-			return;
+			
+			repairs = newRepairs;
 		}
-		
-		System.out.printf("Starting automatic repairing of %d tests, which is expected to take %s long.\n", nTests, time.getTimeString(repairTime));
-
-		if (coordConfigs.useOAR())
-			try {
-				OARHandler.updateWallTime(repairTime, nTests);
-			} catch (OARException e) {
-				System.err.println("[WARNING]Error while interacting with OAR. Proceeding without walltime extension.");
-				e.printStackTrace();
-			}
-		
-		for (PrintWriter out: outs)
-			out.println(Messages.START_AUTOMATIC_REPAIR.toString());
-		currentConfigIndex = 0;
-		
-		for (TestConfigs cfg: multipleConfigs) {
-			List<Integer> toRepair = repairs.getFailedTests(cfg);
-			if (toRepair.isEmpty())
-				System.out.println("Nothing to repair for test file " + cfg.getName());
-			else {
-				System.out.println("Starting automatic repairs for test file " + cfg.getName());
-				for (PrintWriter out: outs)
-					out.println(Messages.AUTO_REPAIR_CFG_.toString() + currentConfigIndex);
-				cfg.setAutomaticRepairs(toRepair);
-				doRepairTests(IS_AUTOMATIC);
-				repairTime = repairs.getRepairTime(); nTests = repairs.getTotalTestsFailed();
-				System.out.printf("Finished automatic repairs for current file. Tests left: %d; Time left: %s; Test repaired name: %s\n", 
-						nTests, time.getTimeString(repairTime), cfg.getName());
-			}
-			currentConfigIndex++;
-		}
-		
-		if (coordConfigs.useOAR())
-			OARHandler.deleteJob();
+		System.out.println("Stopping auto-repair attempts as 5 attempts have already been done.");
 	}
 	
 	private void signalClientShutdown() {

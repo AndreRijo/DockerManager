@@ -35,7 +35,7 @@ public class TestConfigs {
 	public TestConfigs() {
 		vars = new HashMap<String, Variable>();
 		isRepair = false;
-		remoteConfigs = false;
+		remoteConfigs = true;
 		shouldLog = false;
 		notificationPort = -1;
 		operationMode = TIME;
@@ -222,9 +222,8 @@ public class TestConfigs {
 	}
 	
 	//Replaces the internal list with the one in the argument.
-	//Pre: the node list in the argument must have the same length or higher than the original one
 	public void replaceIPs(String[] newIPs) {
-		if (newIPs.length == ips.length)
+		if (newIPs.length <= ips.length)
 			ips = newIPs;
 		else
 			for (int i = 0; i < ips.length; i++) {

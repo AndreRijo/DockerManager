@@ -10,7 +10,7 @@ public class ProcessExecutioner {
 	
 	private String cmd;
 	private Process proc;
-	private boolean shouldWait, shouldLog, shouldPrint;
+	private boolean shouldWait, shouldLog, shouldPrint, failedByTimeout;
 	private OutputReader reader;
 	
 	public ProcessExecutioner(String cmd, boolean shouldWait, boolean shouldLog, boolean shouldPrint) {
@@ -18,6 +18,7 @@ public class ProcessExecutioner {
 		this.shouldWait = shouldWait;
 		this.shouldLog = shouldLog;
 		this.shouldPrint = shouldPrint;
+		failedByTimeout = false;
 	}
 	
 	public void start() {
@@ -42,8 +43,10 @@ public class ProcessExecutioner {
 			proc = Runtime.getRuntime().exec(new String[] {"sh", "-c", cmd});
 			reader = new OutputReader(proc.getInputStream(), shouldLog, shouldPrint);
 			new Thread(reader).start();
-			if (shouldWait)
-				return proc.waitFor(timeout, TimeUnit.SECONDS);
+			if (shouldWait) {
+				failedByTimeout = !proc.waitFor(timeout, TimeUnit.SECONDS);
+				return !failedByTimeout;
+			}
 		} catch (IOException | InterruptedException e) {
 			System.err.println("Error while executing: " + cmd + " in timeout mode.");
 			e.printStackTrace();
@@ -54,6 +57,10 @@ public class ProcessExecutioner {
 	
 	public List<String> getLog() {
 		return reader.getLog();
+	}
+	
+	public boolean failedByTimeout() {
+		return failedByTimeout;
 	}
 }
 

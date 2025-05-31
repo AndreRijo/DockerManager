@@ -38,31 +38,46 @@ public class Client {
 	}
 	
 	public void startTests() throws IOException {
-		waitUntilStart();
-		
-		System.out.println("Using port: " + configs.getOwnPort());
-		ServerSocket serverS = new ServerSocket(configs.getOwnPort());
-		
-		Socket socket = serverS.accept();
-		in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-		out = new PrintWriter(socket.getOutputStream(), true);
-		int indexOffset = Messages.START_TEST.name().length();
-		
-		if (configs.isRemoteConfigs()) {
-			receiveRemoteConfigs(in);
+		Socket socket = null;
+		ServerSocket serverS = null;
+		InputStreamReader is = null;
+		try {
+			waitUntilStart();
+			
+			System.out.println("Using port: " + configs.getOwnPort());
+			serverS = new ServerSocket(configs.getOwnPort());
+			
+			socket = serverS.accept();
+			is = new InputStreamReader(socket.getInputStream());
+			in = new BufferedReader(is);
+			out = new PrintWriter(socket.getOutputStream(), true);
+			int indexOffset = Messages.START_TEST.name().length();
+			
+			if (configs.isRemoteConfigs()) {
+				receiveRemoteConfigs(in);
+			}
+			
+			for (int i = 0; i < allConfigs.length; i++) {
+				configs = allConfigs[i];
+				cmd = cmds[i];
+				stopCmd = stopCmds[i];
+				executeTests(indexOffset);
+			}
+			
+			waitForSignal();
+			
+			is.close();
+			socket.close();
+			serverS.close();
+		} catch (Exception e) {
+			if (is != null)
+				is.close();
+			if (socket != null)
+				socket.close();
+			if (serverS != null)
+				serverS.close();
+			throw e;
 		}
-		
-		for (int i = 0; i < allConfigs.length; i++) {
-			configs = allConfigs[i];
-			cmd = cmds[i];
-			stopCmd = stopCmds[i];
-			executeTests(indexOffset);
-		}
-		
-		waitForSignal();
-		
-		socket.close();
-		serverS.close();
 	}
 	
 	private void executeTests(int indexOffset) throws IOException {
@@ -70,14 +85,16 @@ public class Client {
 		boolean doTest;
 		String cmdS = null, stopCmdS = null;
 		Map<String, String> currValues;
-		for (int i = 0; i < configs.getNTests(); i++) {
-			System.out.printf("Waiting for test %d out of %d\n", i, configs.getNTests());
+		//for (int i = 0; i < configs.getNTests(); i++) {
+		for (int i = 0; true; i++) {
+			if (i < configs.getNTests())
+				System.out.printf("Waiting for test %d out of %d\n", i, configs.getNTests());
 			//Wait for input
 			String input = in.readLine();
-			if (input.equalsIgnoreCase(Messages.REPAIR_TEST_OVER.name())) {
+			if (input.equalsIgnoreCase(Messages.TEST_OVER.name())) {
 				nTestsDone += (configs.getNTests() - i - 1);
 				break;
-			};
+			}
 			System.out.println("Received input, canStart. Input: " + input);
 			Messages.valueOf(input.substring(0, indexOffset));
 			receivedTest = Integer.parseInt(input.substring(indexOffset));
@@ -115,10 +132,18 @@ public class Client {
 			firstLog = ps.getLog();
 		System.out.println(stopCmdS);
 		ps = new ProcessExecutioner(stopCmdS, true, originalConfigs.shouldLog(), false);
-		ps.start();
+		for (int failed = 0; failed < 3; failed++) {
+			boolean finished = ps.startWithTimeout(10);	//On some error situations, it may fail to execute the command; we will repeat up to 3 times
+			if (finished)
+				break;
+		}
 		if (originalConfigs.shouldLog()) {
+			try {
+				Thread.sleep(10);	//BufferedReader may still be making output.
+			} catch (InterruptedException e) {
+			}
 			secondLog = ps.getLog();
-			saveLog(firstLog, secondLog, cmdS, stopCmdS);
+			saveLog(firstLog, secondLog, cmdS, stopCmdS, ps.failedByTimeout());
 		}
 	}
 	
@@ -236,8 +261,13 @@ public class Client {
 	private void waitForSignal() throws IOException {
 		System.out.println("Waiting for coordinator instructions...");
 		String msg = in.readLine();
-		if (msg.equalsIgnoreCase(Messages.START_AUTOMATIC_REPAIR.toString()))
-			doAutomaticRepairs();
+		if (msg.equalsIgnoreCase(Messages.START_AUTOMATIC_REPAIR.toString())) {
+			do {
+				doAutomaticRepairs();
+				msg = in.readLine();
+				System.out.println("Finished automatic repair. Message read from coordinator: " + msg);
+			} while (msg.equalsIgnoreCase(Messages.START_AUTOMATIC_REPAIR.toString()));
+		}
 		System.out.println("Shutting down...");
 	}
 	
@@ -256,9 +286,13 @@ public class Client {
 		}
 	}
 	
-	private void saveLog(List<String> firstLog, List<String> secondLog, String firstCmd, String secondCmd) {
+	private void saveLog(List<String> firstLog, List<String> secondLog, String firstCmd, String secondCmd, boolean failed) {
 		try {
-			PrintWriter pw = new PrintWriter(new FileOutputStream(LOG_LOCATION + configs.getNode() + "_" + (nTestsDone + 1) + LOG_SUFFIX));
+			PrintWriter pw;
+			if (failed)
+				pw = new PrintWriter(new FileOutputStream(LOG_LOCATION + "_err_" + configs.getNode() + "_" + (nTestsDone + 1) + LOG_SUFFIX));
+			else
+				pw = new PrintWriter(new FileOutputStream(LOG_LOCATION + configs.getNode() + "_" + (nTestsDone + 1) + LOG_SUFFIX));
 			pw.println(firstCmd);
 			pw.println();
 			for (String line: firstLog)

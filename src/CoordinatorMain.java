@@ -4,6 +4,8 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Scanner;
 
+import exceptions.ConnectionFailedException;
+
 public class CoordinatorMain {
 	
 	//TODO: Oarwalltime support. Check end of file for some information.
@@ -11,22 +13,25 @@ public class CoordinatorMain {
 
 	public static final String REPAIR = "repair";
 	public static final String WAIT_FOR = "waitfor";		//Note: assumes all tests have the same nodes involved. Used when those nodes are in ACTIVE mode.
-	public static final String AUTOMATIC_REPAIR = "autorepair";		//Detects when a test fails (via timeout) and schedules it for repeat later. Requires --waitfor option.
+	//Detects when a test fails (via timeout) and schedules it for repeat later. Requires --waitfor option.
+	//If passed an int (x) argument, it will also consider tests that end too early by x seconds as failed.
+	public static final String AUTOMATIC_REPAIR = "autorepair";
 	public static final String OAR_JOB_ID = "oarjobid";		//If this isn't present then OAR isn't used. OAR is only supported on frontnode so... this is useless unfortunately :(
 	public static final String NODES = "nodes";	//Replaces the list of nodes in each configuration file by the one provided in this argument. Separate each node with a ",".
+	public static final String STOP_ON_ERR = "stoponerror";	//If true, DockerManager will stop if any tests fails too early or too late. Useful for debugging. Default: false.
 	
 	private static String rangesString;
 	
 	//Ranges: "|" for different tests; "," for multiple ranges in the same test.
 	public static void main(String[] args) throws NumberFormatException, IOException, InterruptedException {
-		
+		String[][][] allCmds = null;	
 		TestConfigs configs = new TestConfigs();
 		CoordinatorConfigs coordConfigs = new CoordinatorConfigs();
 		coordConfigs.setSuspiciousOffset(Integer.MAX_VALUE);
 		processArgs(args, configs, coordConfigs);
 		Scanner in = new Scanner(System.in);
 		String[] configsLocs;
-		
+
 		if (configs.isRemoteConfigs()) {
 			System.out.println("Number of configs?");
 			int nConfigs = Integer.parseInt(in.nextLine());
@@ -39,7 +44,7 @@ public class CoordinatorMain {
 			configsLocs = new String[1];
 			configsLocs[0] = in.nextLine();
 		}
-		
+
 		TestConfigs[] allConfigs = new TestConfigs[configsLocs.length];
 		int i = 0;
 		try {
@@ -57,7 +62,7 @@ public class CoordinatorMain {
 			in.close();
 			return;
 		}
-		
+
 		if (rangesString != null) {
 			System.out.println(rangesString);
 			String[] rangesPerConfig = rangesString.split("\\|");
@@ -76,19 +81,19 @@ public class CoordinatorMain {
 				}
 			}
 			//in.nextLine();	//For some reason this is required...
-				
+
 		}
-		
+
 		for (int k = 0; k < allConfigs.length; k++)
 			if(!checkNumberOfTests(in, configsLocs[k], allConfigs[k])) {
 				System.out.println("Aborting as requested by the user. Please fix the tests configurations.");
 				System.exit(0);
 			}
-				
-		
+
+
 		Coordinator cd = null;
 		if (configs.isRemoteConfigs()) {
-			String[][][] allCmds = new String[allConfigs.length][][];
+			allCmds = new String[allConfigs.length][][];
 			for (i = 0; i < allConfigs.length; i++) {
 				int nNodes = configs.getNNodes();
 				String[][] remoteCmds = new String[nNodes][4];
@@ -104,11 +109,54 @@ public class CoordinatorMain {
 			cd = new Coordinator(coordConfigs, allConfigs, allCmds);
 		} else
 			cd = new Coordinator(coordConfigs, allConfigs);
-		
-		in.close();
-		
-		cd.manageTests();
-		
+
+
+		boolean testStartedSuccessfully = false;
+		do {
+			try {
+				cd.prepareTests();
+				in.close();
+				testStartedSuccessfully = true;
+				cd.startTests();
+			} catch (ConnectionFailedException e) {
+				configs.setWaitTime(0);//Reset any sleeping time, as we already slept.
+				System.err.println("Will re-attempt to connect to clients and start the tests. Please press enter when ready.");
+				System.err.println("Type yes to re-attempt connection. Type new or nodes to specify a new list of clients. Type no or exit to close the program.");
+				String input = in.nextLine().toLowerCase();
+				boolean redo = false;
+				switch (input) {
+				case "yes":
+				case "y":
+				case "":
+					redo = true;
+					break;
+				case "new":
+				case "nodes":
+				case "node":
+					System.out.println("Please type the new list of nodes:");
+					String nodes = in.nextLine();
+					coordConfigs.setNodeList(nodes.split(","));
+					String[] nodeList = coordConfigs.getNodeList();
+					for (i = 0; i < configsLocs.length; i++)
+						allConfigs[i].replaceIPs(nodeList);
+					System.out.println("New node list: " + nodes);
+					redo = true;
+					break;
+				case "no":
+				case "exit":
+				case "quit":
+				case "abort":
+					testStartedSuccessfully = true;
+					break;
+				}
+				if (redo) {
+					if (configs.isRemoteConfigs())
+						cd = new Coordinator(coordConfigs, allConfigs, allCmds);
+					else
+						cd = new Coordinator(coordConfigs, allConfigs);
+				}
+			}
+		} while (!testStartedSuccessfully);
 	}
 	
 	private static boolean checkNumberOfTests(Scanner in, String configName, TestConfigs configs) {
@@ -155,8 +203,15 @@ public class CoordinatorMain {
 				System.out.println("]");
 			}
 		}
-		System.out.println("Are these configs OK? (true/false)");
-		return Boolean.parseBoolean(in.nextLine());
+		while (true) {	//Boolean.parseBoolean only checks if the string is exactly "true". Might as well we check that manually for finer control.
+			System.out.println("Are these configs OK? (true/false)");
+			String input = in.nextLine();
+			if (input.equalsIgnoreCase("true") || input.equalsIgnoreCase("yes"))
+				return true;
+			if (input.equalsIgnoreCase("false") || input.equalsIgnoreCase("no"))
+				return false;
+			System.out.println("Invalid input, ignored. Are these configs OK? (true/false)");		
+		}
 	}
 
 	private static void processArgs(String[] args, TestConfigs configs, CoordinatorConfigs coordConfigs) {
@@ -189,6 +244,11 @@ public class CoordinatorMain {
 				OARHandler.setJobID(Integer.parseInt(value));
 			} else if (name.endsWith(NODES))
 				coordConfigs.setNodeList(value.split(","));
+			else if (name.endsWith(STOP_ON_ERR)) {
+				coordConfigs.setStopOnError(Boolean.parseBoolean(value));
+				if (coordConfigs.stopOnError())
+					System.out.println("Will stop executing tests if any error is found or if a test timeouts or ends too early.");
+			}
 			else {
 				System.out.println("Unknown param " + name);
 				System.out.printf("Known params: --%s --%s --%s --%s --%s --%s\n", ClientMain.SLEEP_BEFORE, REPAIR, AUTOMATIC_REPAIR, ClientMain.REMOTE_CONFIGS, WAIT_FOR, NODES);
@@ -209,7 +269,8 @@ public class CoordinatorMain {
 		String line = "";
 		do {
 			line = in.nextLine();
-		} while (line.isEmpty() || line.trim().equals("") || line.startsWith("//") || line.startsWith("#"));
+		} while (line.isEmpty() || line.trim().equals("") || line.startsWith("//") || 
+				line.startsWith("#") || line.equalsIgnoreCase("true") || line.equalsIgnoreCase("false"));
 		return line;
 	}
 	

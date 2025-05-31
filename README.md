@@ -25,7 +25,7 @@ The following optional parameters are supported by both ClientMain and Coordinat
 - `coordconfigs true/false`: if `true`, the client will receive the test configurations automatically from the coordinator. If `false`, the client will read from the standard input the test configurations. The value for this parameter must be the same for the clients and coordinator. Default: `true`;
 
 ClientMain supports the following optional parameters:
-- `mode modeName`: three possible values: - `time` ends the execution as soon as the time for the test ends; - `active` watches until the command executed by the client finishes, and informs the coordinator when it does finish; - `passive` waits until the coordinator informs that all clients with `active` have ended. Default: `time`;
+- `mode modeName`: three possible values: `time` ends the execution as soon as the time for the test ends; `active` watches until the command executed by the client finishes, and informs the coordinator when it does finish; `passive` waits until the coordinator informs that all clients with `active` have ended. Default: `time`;
 - `port number`: the port to listen to the Coordinator. Only relevant if coordconfigs is set to true. Default: `6666`;
 - `savelog true/false`: if true, a log with the standard output of the commands executed will be produced. Default: `false`.
 
